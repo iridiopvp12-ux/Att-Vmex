@@ -1,264 +1,268 @@
-# att/app/ui/empresa_cadastro_window.py (MODIFICADO com as regras selecionadas)
+# app/ui/empresa_cadastro_window.py
 
-import FreeSimpleGUI as sg
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QFrame,
+    QGroupBox, QMessageBox, QAbstractItemView
+)
+from PySide6.QtCore import Qt
+from typing import Optional, Dict, Any
 import sys
-from typing import TYPE_CHECKING, Any, Optional
 
-# --- Importa a lógica e o ConfigLoader ---
+# Adaptação dos imports de lógica
 try:
     from app import empresa_logic
     from app.config import ConfigLoader
-except (ModuleNotFoundError, ImportError):
-    print("Aviso: Importando 'empresa_logic' ou 'ConfigLoader' de forma não padrão.")
-    try:
-        import empresa_logic # type: ignore
-        from config import ConfigLoader # type: ignore
-    except ImportError:
-        sg.popup_error("Erro fatal: Não foi possível carregar 'empresa_logic' ou 'ConfigLoader'.")
-        sys.exit(1)
+except ImportError:
+    # Fallback para execução isolada (dev)
+    pass
 
-if TYPE_CHECKING:
-    from app.config import ConfigLoader
+from app.ui.styles import get_stylesheet
 
+class EmpresaCadastroWindow(QDialog):
+    def __init__(self, config: ConfigLoader):
+        super().__init__()
+        self.config = config
+        self.selected_cnpj: Optional[str] = None
 
-def atualizar_tabela(window: sg.Window, config: 'ConfigLoader', search_term: str = ""):
-    """Busca os dados no banco (com filtro) e atualiza a tabela na tela."""
-    try:
-        empresas_list = empresa_logic.listar_todas_empresas(config.db_empresas_path, search_term) 
-        window['-TABELA_EMPRESAS-'].update(values=empresas_list) 
-    except Exception as e:
-        sg.popup_error(f"Erro ao carregar empresas:\n{e}")
+        # Inicializa banco
+        try:
+            empresa_logic.inicializar_banco(self.config.db_empresas_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Erro DB", f"Erro CRÍTICO ao inicializar banco:\n{e}")
+            self.reject()
 
-def limpar_e_resetar_form(window: sg.Window):
-    """Limpa os campos de input, checkboxes e reseta os botões para 'novo cadastro'."""
-    window['-CNPJ-'].update('', disabled=False) 
-    window['-RAZAO-'].update('')
-    
-    # Limpa regras mantidas
-    window['-REGRA_IGNORAR_CANCELADAS-'].update(False)
-    
-    # --- LIMPAR NOVAS REGRAS (MANTIDAS) ---
-    window['-REGRA_SIMPLES_NACIONAL-'].update(False)
-    window['-REGRA_TOLERANCIA_ZERO-'].update(False)
-    window['-REGRA_SEM_C170-'].update(False)
-    window['-REGRA_IGNORAR_ICMS-'].update(False)
-    window['-REGRA_EXIGIR_ACUMULADOR-'].update(False)
-    
-    window['-SALVAR-'].update('Salvar Empresa') 
-    window['-EXCLUIR-'].update(disabled=True)    
-    window['-TABELA_EMPRESAS-'].update(select_rows=[]) 
-    
-    window['-CNPJ-'].set_focus()
+        self.init_ui()
+        self.atualizar_tabela()
 
+    def init_ui(self):
+        self.setWindowTitle("Gestão de Empresas e Regras")
+        self.resize(900, 650)
+        self.setStyleSheet(get_stylesheet(self.config.font_family))
 
-def carregar_empresa_para_edicao(window: sg.Window, config: 'ConfigLoader', cnpj: str, razao: str):
-    """Busca regras da empresa e preenche o formulário para edição."""
-    try:
-        regras_dict = empresa_logic.obter_regras_empresa(config.db_empresas_path, cnpj) or {}
-        
-        window['-CNPJ-'].update(cnpj, disabled=True) 
-        window['-RAZAO-'].update(razao)
-        
-        # Carrega regras mantidas
-        window['-REGRA_IGNORAR_CANCELADAS-'].update(regras_dict.get('ignorar_canceladas', False))
-        
-        # --- CARREGAR NOVAS REGRAS (MANTIDAS) ---
-        window['-REGRA_SIMPLES_NACIONAL-'].update(regras_dict.get('nao_calcular_pis_cofins', False))
-        window['-REGRA_TOLERANCIA_ZERO-'].update(regras_dict.get('usar_tolerancia_zero', False))
-        window['-REGRA_SEM_C170-'].update(regras_dict.get('sped_sem_c170_nfe', False))
-        window['-REGRA_IGNORAR_ICMS-'].update(regras_dict.get('ignorar_validacao_icms', False))
-        window['-REGRA_EXIGIR_ACUMULADOR-'].update(regras_dict.get('exigir_acumulador', False))
-        
-        window['-SALVAR-'].update('Atualizar Empresa')
-        window['-EXCLUIR-'].update(disabled=False) 
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
-    except Exception as e:
-        sg.popup_error(f"Erro ao carregar dados da empresa '{cnpj}':\n{e}")
-        limpar_e_resetar_form(window)
+        # --- FRAME DE CADASTRO (Superior) ---
+        cadastro_group = QGroupBox("Cadastrar / Editar Empresa")
+        cadastro_layout = QVBoxLayout(cadastro_group)
+        cadastro_layout.setSpacing(15)
 
+        # Linha 1: CNPJ e Razão
+        row1 = QHBoxLayout()
 
-def create_window(config: 'ConfigLoader'):
-    try:
-        theme = config.theme_name
-        font_family = config.font_family
-        sg.theme(theme)
-    except Exception:
-        sg.theme('DarkBlue') 
-        font_family = 'Segoe UI'
+        self.txt_cnpj = QLineEdit()
+        self.txt_cnpj.setPlaceholderText("CNPJ (somente números)")
+        self.txt_cnpj.setFixedWidth(150)
 
-    font_std = (font_family, 10)
-    font_bold = (font_family, 11, 'bold')
-    font_frame = (font_family, 12, 'bold')
+        self.txt_razao = QLineEdit()
+        self.txt_razao.setPlaceholderText("Razão Social")
 
-    # --- LAYOUT DE REGRAS ATUALIZADO (SOMENTE MARCADAS) ---
-    layout_regras_automacao = [
-        [sg.Checkbox('Ignorar Notas Fiscais Canceladas?', key='-REGRA_IGNORAR_CANCELADAS-', font=font_std)],
-    ]
+        row1.addWidget(QLabel("CNPJ:"))
+        row1.addWidget(self.txt_cnpj)
+        row1.addWidget(QLabel("Razão Social:"))
+        row1.addWidget(self.txt_razao)
 
-    layout_regras_analisador = [
-        [sg.Checkbox('Não calcular PIS/COFINS (Simples Nacional)?', key='-REGRA_SIMPLES_NACIONAL-', font=font_std,
-                     tooltip='Pula a validação de PIS/COFINS para este CNPJ.')],
-        [sg.Checkbox('Usar Tolerância Zero (Valores Exatos)?', key='-REGRA_TOLERANCIA_ZERO-', font=font_std,
-                     tooltip='Valida impostos e totais com R$ 0,00 de tolerância.')],
-        [sg.Checkbox('SPED não escritura C170 (Ignorar Itens)?', key='-REGRA_SEM_C170-', font=font_std,
-                     tooltip='Pula a validação de CFOP item a item (C170 vs <det>).')],
-        [sg.Checkbox('Desativar validação de crédito de ICMS?', key='-REGRA_IGNORAR_ICMS-', font=font_std,
-                     tooltip='Desativa completamente a verificação de STATUS_ICMS.')],
-        [sg.Checkbox('Exigir Acumulador (Forçar "Revisar")?', key='-REGRA_EXIGIR_ACUMULADOR-', font=font_std,
-                     tooltip='Se um acumulador não for encontrado, força o STATUS_GERAL da nota para "REVISAR".')],
-    ]
-    # --- FIM DA ATUALIZAÇÃO DO LAYOUT ---
-    
-    layout_cadastro = [
-        [sg.Text('CNPJ:', size=(10, 1), font=font_std), sg.Input(key='-CNPJ-', size=(20, 1), font=font_std)],
-        [sg.Text('Razão Social:', size=(10, 1), font=font_std), sg.Input(key='-RAZAO-', size=(40, 1), font=font_std)],
-        [sg.HSeparator()],
-        # --- SEPARADO EM DOIS FRAMES ---
-        [sg.Frame('Regras de Automação', layout_regras_automacao, font=font_frame)],
-        [sg.Frame('Regras do Analisador Fiscal (Geral)', layout_regras_analisador, font=font_frame)],
-        [sg.Button('Salvar Empresa', key='-SALVAR-', font=font_std), 
-         sg.Button('Limpar Campos', key='-LIMPAR-', font=font_std)]
-    ]
-    
-    layout_lista_empresas = [
-        [sg.Text('Buscar (CNPJ ou Razão):', font=font_std), 
-         sg.Input(key='-BUSCA-', expand_x=True, enable_events=True, font=font_std),
-         sg.Button('Buscar', key='-BUSCAR-', font=font_std),
-         sg.Button('Limpar', key='-LIMPAR_BUSCA-', font=font_std)],
-        [sg.Table(
-            values=[], headings=['CNPJ', 'Razão Social'], key='-TABELA_EMPRESAS-',
-            display_row_numbers=False, auto_size_columns=False, col_widths=[18, 40],
-            justification='left', expand_x=True, expand_y=True, font=font_std,
-            enable_events=True, 
-            select_mode=sg.TABLE_SELECT_MODE_BROWSE 
-        )],
-        [sg.Push(), 
-         sg.Button('Atualizar Lista', key='-ATUALIZAR-', font=font_std), 
-         sg.Button('Excluir Selecionada', key='-EXCLUIR-', font=font_std, 
-                   button_color=('white', '#DC3545'), disabled=True)] 
-    ]
+        cadastro_layout.addLayout(row1)
 
-    layout = [
-        [sg.Frame('Cadastrar/Editar Empresa', layout_cadastro, vertical_alignment='top', font=font_bold),
-         sg.Frame('Empresas Salvas', layout_lista_empresas, expand_x=True, expand_y=True, font=font_bold)]
-    ]
+        # Regras de Automação
+        regras_auto_group = QGroupBox("Regras de Automação")
+        ra_layout = QVBoxLayout(regras_auto_group)
+        self.chk_ignorar_canceladas = QCheckBox("Ignorar Notas Fiscais Canceladas?")
+        ra_layout.addWidget(self.chk_ignorar_canceladas)
+        cadastro_layout.addWidget(regras_auto_group)
 
-    # Ajustei a altura da janela para o novo layout
-    window = sg.Window('Gestão de Empresas e Regras', layout, resizable=True, finalize=True, modal=True,
-                       icon=config.app_icon_path, size=(800, 500)) 
-    
-    try:
-        empresa_logic.inicializar_banco(config.db_empresas_path)
-    except Exception as e:
-         sg.popup_error(f"Erro CRÍTICO ao inicializar banco de dados de empresas:\n{e}", title="Erro DB")
-         window.close() 
-         return None 
+        # Regras do Analisador
+        regras_ana_group = QGroupBox("Regras do Analisador Fiscal")
+        ran_layout = QVBoxLayout(regras_ana_group)
 
-    return window
+        self.chk_simples = QCheckBox("Não calcular PIS/COFINS (Simples Nacional)?")
+        self.chk_simples.setToolTip("Pula a validação de PIS/COFINS para este CNPJ.")
 
-def main(config: 'ConfigLoader'): 
-    window = create_window(config)
-    
-    if window is None: 
-        return
+        self.chk_tolerancia_zero = QCheckBox("Usar Tolerância Zero (Valores Exatos)?")
+        self.chk_tolerancia_zero.setToolTip("Valida impostos e totais com R$ 0,00 de tolerância.")
 
-    atualizar_tabela(window, config)
-    selected_cnpj: Optional[str] = None 
+        self.chk_sem_c170 = QCheckBox("SPED não escritura C170 (Ignorar Itens)?")
+        self.chk_sem_c170.setToolTip("Pula a validação de CFOP item a item (C170 vs <det>).")
 
-    while True:
-        event, values = window.read()
-        
-        if event == sg.WIN_CLOSED:
-            break
-            
-        if event == '-SALVAR-':
-            cnpj = values['-CNPJ-'] 
-            razao = values['-RAZAO-']
-            
-            if not cnpj or not razao:
-                sg.popup_error('Erro: CNPJ e Razão Social são obrigatórios.')
-                continue
+        self.chk_ignorar_icms = QCheckBox("Desativar validação de crédito de ICMS?")
+        self.chk_ignorar_icms.setToolTip("Desativa completamente a verificação de STATUS_ICMS.")
 
-            # --- DICIONÁRIO DE REGRAS ATUALIZADO (SOMENTE MARCADAS) ---
-            regras_dict = {
-                # Regra de Automação Mantida
-                'ignorar_canceladas': values['-REGRA_IGNORAR_CANCELADAS-'],
-                
-                # Novas Regras (Analisador Fiscal) Mantidas
-                'nao_calcular_pis_cofins': values['-REGRA_SIMPLES_NACIONAL-'],
-                'usar_tolerancia_zero': values['-REGRA_TOLERANCIA_ZERO-'],
-                'sped_sem_c170_nfe': values['-REGRA_SEM_C170-'],
-                'ignorar_validacao_icms': values['-REGRA_IGNORAR_ICMS-'],
-                'exigir_acumulador': values['-REGRA_EXIGIR_ACUMULADOR-'],
-                
-                # --- REGRAS REMOVIDAS ---
-                # 'aproveitar_icms': False, 
-                # 'regime_presumido_pis_cofins': False,
-                # 'excluir_frete_base_pis_cofins': False,
-            }
-            # --- FIM DA ATUALIZAÇÃO ---
-            
+        self.chk_exigir_acum = QCheckBox("Exigir Acumulador (Forçar 'Revisar')?")
+        self.chk_exigir_acum.setToolTip("Se um acumulador não for encontrado, força o STATUS_GERAL da nota para 'REVISAR'.")
+
+        ran_layout.addWidget(self.chk_simples)
+        ran_layout.addWidget(self.chk_tolerancia_zero)
+        ran_layout.addWidget(self.chk_sem_c170)
+        ran_layout.addWidget(self.chk_ignorar_icms)
+        ran_layout.addWidget(self.chk_exigir_acum)
+        cadastro_layout.addWidget(regras_ana_group)
+
+        # Botões de Ação do Cadastro
+        btn_row = QHBoxLayout()
+        self.btn_salvar = QPushButton("Salvar Empresa")
+        self.btn_salvar.setObjectName("Primary")
+        self.btn_salvar.clicked.connect(self.salvar_empresa)
+
+        self.btn_limpar = QPushButton("Limpar Campos")
+        self.btn_limpar.clicked.connect(self.limpar_form)
+
+        btn_row.addWidget(self.btn_salvar)
+        btn_row.addWidget(self.btn_limpar)
+        btn_row.addStretch()
+
+        cadastro_layout.addLayout(btn_row)
+        main_layout.addWidget(cadastro_group)
+
+        # --- FRAME DE LISTAGEM (Inferior) ---
+        lista_group = QGroupBox("Empresas Salvas")
+        lista_layout = QVBoxLayout(lista_group)
+
+        # Busca
+        busca_row = QHBoxLayout()
+        self.txt_busca = QLineEdit()
+        self.txt_busca.setPlaceholderText("Buscar por CNPJ ou Razão...")
+        self.txt_busca.textChanged.connect(lambda: self.atualizar_tabela(self.txt_busca.text()))
+
+        btn_atualizar = QPushButton("Atualizar Lista")
+        btn_atualizar.clicked.connect(lambda: self.atualizar_tabela(self.txt_busca.text()))
+
+        busca_row.addWidget(QLabel("Buscar:"))
+        busca_row.addWidget(self.txt_busca)
+        busca_row.addWidget(btn_atualizar)
+        lista_layout.addLayout(busca_row)
+
+        # Tabela
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["CNPJ", "Razão Social"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.itemSelectionChanged.connect(self.on_table_select)
+
+        lista_layout.addWidget(self.table)
+
+        # Botão Excluir
+        self.btn_excluir = QPushButton("Excluir Selecionada")
+        self.btn_excluir.setObjectName("Danger")
+        self.btn_excluir.setEnabled(False)
+        self.btn_excluir.clicked.connect(self.excluir_empresa)
+
+        lista_layout.addWidget(self.btn_excluir, alignment=Qt.AlignRight)
+
+        main_layout.addWidget(lista_group)
+
+    def atualizar_tabela(self, search_term=""):
+        try:
+            empresas_list = empresa_logic.listar_todas_empresas(self.config.db_empresas_path, search_term)
+            self.table.setRowCount(0)
+            for row_idx, row_data in enumerate(empresas_list):
+                self.table.insertRow(row_idx)
+                # row_data é [cnpj, razao]
+                self.table.setItem(row_idx, 0, QTableWidgetItem(str(row_data[0])))
+                self.table.setItem(row_idx, 1, QTableWidgetItem(str(row_data[1])))
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao carregar empresas:\n{e}")
+
+    def on_table_select(self):
+        selected_items = self.table.selectedItems()
+        if not selected_items:
+            self.selected_cnpj = None
+            self.btn_excluir.setEnabled(False)
+            return
+
+        # Pega a linha selecionada
+        row = selected_items[0].row()
+        cnpj = self.table.item(row, 0).text()
+        razao = self.table.item(row, 1).text()
+
+        self.carregar_empresa(cnpj, razao)
+
+    def carregar_empresa(self, cnpj, razao):
+        self.selected_cnpj = cnpj
+        self.btn_excluir.setEnabled(True)
+        self.btn_salvar.setText("Atualizar Empresa")
+        self.txt_cnpj.setText(cnpj)
+        self.txt_cnpj.setDisabled(True) # Não pode editar PK
+        self.txt_razao.setText(razao)
+
+        try:
+            regras = empresa_logic.obter_regras_empresa(self.config.db_empresas_path, cnpj) or {}
+            self.chk_ignorar_canceladas.setChecked(regras.get('ignorar_canceladas', False))
+            self.chk_simples.setChecked(regras.get('nao_calcular_pis_cofins', False))
+            self.chk_tolerancia_zero.setChecked(regras.get('usar_tolerancia_zero', False))
+            self.chk_sem_c170.setChecked(regras.get('sped_sem_c170_nfe', False))
+            self.chk_ignorar_icms.setChecked(regras.get('ignorar_validacao_icms', False))
+            self.chk_exigir_acum.setChecked(regras.get('exigir_acumulador', False))
+        except Exception as e:
+            QMessageBox.warning(self, "Aviso", f"Erro ao carregar regras:\n{e}")
+
+    def limpar_form(self):
+        self.selected_cnpj = None
+        self.txt_cnpj.clear()
+        self.txt_cnpj.setDisabled(False)
+        self.txt_cnpj.setFocus()
+        self.txt_razao.clear()
+
+        self.chk_ignorar_canceladas.setChecked(False)
+        self.chk_simples.setChecked(False)
+        self.chk_tolerancia_zero.setChecked(False)
+        self.chk_sem_c170.setChecked(False)
+        self.chk_ignorar_icms.setChecked(False)
+        self.chk_exigir_acum.setChecked(False)
+
+        self.btn_salvar.setText("Salvar Empresa")
+        self.btn_excluir.setEnabled(False)
+        self.table.clearSelection()
+
+    def salvar_empresa(self):
+        cnpj = self.txt_cnpj.text().strip()
+        razao = self.txt_razao.text().strip()
+
+        if not cnpj or not razao:
+            QMessageBox.warning(self, "Aviso", "CNPJ e Razão Social são obrigatórios.")
+            return
+
+        regras_dict = {
+            'ignorar_canceladas': self.chk_ignorar_canceladas.isChecked(),
+            'nao_calcular_pis_cofins': self.chk_simples.isChecked(),
+            'usar_tolerancia_zero': self.chk_tolerancia_zero.isChecked(),
+            'sped_sem_c170_nfe': self.chk_sem_c170.isChecked(),
+            'ignorar_validacao_icms': self.chk_ignorar_icms.isChecked(),
+            'exigir_acumulador': self.chk_exigir_acum.isChecked(),
+        }
+
+        try:
+            empresa_logic.salvar_empresa(self.config.db_empresas_path, cnpj, razao, regras_dict)
+            QMessageBox.information(self, "Sucesso", "Empresa salva com sucesso.")
+            self.limpar_form()
+            self.atualizar_tabela(self.txt_busca.text())
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao salvar no banco:\n{e}")
+
+    def excluir_empresa(self):
+        if not self.selected_cnpj: return
+
+        reply = QMessageBox.question(
+            self, "Confirmar Exclusão",
+            f"Tem certeza que deseja EXCLUIR a empresa CNPJ: {self.selected_cnpj}?\nEsta ação não pode ser desfeita.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
             try:
-                empresa_logic.salvar_empresa(config.db_empresas_path, cnpj, razao, regras_dict) 
-                
-                msg = 'Empresa atualizada com sucesso.' if selected_cnpj else 'Empresa salva com sucesso.'
-                sg.popup('Sucesso!', msg)
-                
-                selected_cnpj = None 
-                limpar_e_resetar_form(window)
-                atualizar_tabela(window, config, values['-BUSCA-']) 
+                empresa_logic.delete_empresa(self.config.db_empresas_path, self.selected_cnpj)
+                QMessageBox.information(self, "Sucesso", "Empresa excluída.")
+                self.limpar_form()
+                self.atualizar_tabela(self.txt_busca.text())
             except Exception as e:
-                sg.popup_error(f'Erro ao salvar no banco:\n{e}')
+                QMessageBox.critical(self, "Erro", f"Erro ao excluir empresa:\n{e}")
 
-        if event == '-TABELA_EMPRESAS-':
-            selected_indices = values['-TABELA_EMPRESAS-']
-            if selected_indices:
-                try:
-                    selected_row_index = selected_indices[0]
-                    table_data = window['-TABELA_EMPRESAS-'].Values 
-                    selected_row = table_data[selected_row_index]
-                    cnpj, razao = selected_row[0], selected_row[1]
-                    
-                    selected_cnpj = cnpj 
-                    carregar_empresa_para_edicao(window, config, cnpj, razao)
-                except IndexError:
-                    print("Erro de índice ao selecionar linha. Tabela pode estar vazia ou atualizando.")
-                    selected_cnpj = None
-                    limpar_e_resetar_form(window)
-                except Exception as e:
-                     sg.popup_error(f"Erro ao carregar empresa: {e}")
-                     selected_cnpj = None
-                     limpar_e_resetar_form(window)
-
-        if event == '-EXCLUIR-':
-            if not selected_cnpj:
-                sg.popup_error("Nenhuma empresa selecionada para exclusão.")
-                continue
-                
-            if sg.popup_yes_no(f"Tem certeza que deseja EXCLUIR a empresa:\n\nCNPJ: {selected_cnpj}\n\nEsta ação não pode ser desfeita.", title="Confirmar Exclusão") == 'Yes':
-                try:
-                    empresa_logic.delete_empresa(config.db_empresas_path, selected_cnpj)
-                    sg.popup_ok("Empresa excluída com sucesso.")
-                    selected_cnpj = None
-                    limpar_e_resetar_form(window)
-                    atualizar_tabela(window, config, values['-BUSCA-']) 
-                except Exception as e:
-                    sg.popup_error(f"Erro ao excluir empresa:\n{e}")
-
-        if event == '-BUSCAR-' or (event == '-BUSCA-' and values['-BUSCA-']): 
-            search_term = values['-BUSCA-']
-            atualizar_tabela(window, config, search_term)
-
-        if event == '-LIMPAR_BUSCA-':
-            window['-BUSCA-'].update('')
-            atualizar_tabela(window, config) 
-
-        if event == '-LIMPAR-':
-            selected_cnpj = None 
-            limpar_e_resetar_form(window)
-
-        if event == '-ATUALIZAR-':
-            atualizar_tabela(window, config, values['-BUSCA-']) 
-
-    window.close()
-
+# Método de compatibilidade para chamada estática, se necessário
+def main(config: ConfigLoader):
+    win = EmpresaCadastroWindow(config)
+    win.exec()

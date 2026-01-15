@@ -1,7 +1,7 @@
 import logging
 import xml.etree.ElementTree as ET
 import pandas as pd
-import FreeSimpleGUI as sg
+# import FreeSimpleGUI as sg # REMOVIDO
 from pathlib import Path
 from typing import List, Any, Dict, Optional, Tuple
 
@@ -15,7 +15,7 @@ NS_CTE_FIND = f"{{{NS_CTE_URI}}}" # Formato {uri}Tag para buscas diretas no Elem
 # --- FIM DAS CONSTANTES ---
 
 
-def processar_pasta_xml(pasta_xmls: Path, window: sg.Window) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def processar_pasta_xml(pasta_xmls: Path, window: Any) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Lê arquivos XML e retorna três DataFrames: (df_nfe_totais, df_nfe_itens, df_cte_totais)."""
     logging.info('Lendo arquivos XML (NF-e e CT-e)...')
     dados_totais: List[Dict[str, Any]] = []    # Para totais de NF-e
