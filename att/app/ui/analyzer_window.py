@@ -1,353 +1,329 @@
-import FreeSimpleGUI as sg
-import threading
-import subprocess
-import os
-import sys
-import logging
-from pathlib import Path
-from typing import List, Optional, Tuple
+# app/ui/analyzer_window.py
 
-# Ajuste este import conforme a estrutura da sua pasta (app.fiscal.fiscal_logic ou app.fiscal_logic)
-from app.fiscal_logic import (
-    setup_logging,
-    executar_analise_completa
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QCheckBox, QFileDialog, QProgressBar, QTextEdit, QFrame, QComboBox, QMessageBox, QGroupBox,
+    QGridLayout
 )
+from PySide6.QtCore import Qt, Slot, QThread
+from PySide6.QtGui import QIcon
+
+import threading
+import sys
+import os
+import subprocess
+from pathlib import Path
+from typing import List, Optional
+
 from app.config import ConfigLoader
-from app.ui.admin_window import AdminWindow
+from app.ui.styles import get_stylesheet
+from app.ui.qt_adapter import WorkerSignals, WindowAdapter
 
-class AnalyzerWindow:
-    """Encapsula a criação e o loop de eventos da janela do Analisador Fiscal."""
+# Imports de lógica (compatibilidade)
+from app.fiscal_logic import setup_logging, executar_analise_completa
+# from app.ui.admin_window import AdminWindow # REMOVIDO: Janela não portada ainda
 
+class AnalyzerWindow(QWidget):
+    """
+    Janela do Analisador Fiscal em PySide6.
+    """
     def __init__(self, config: ConfigLoader, username: str, permissions: List[str]):
+        super().__init__()
         self.config = config
         self.username = username
         self.permissions = permissions
-        self.window: sg.Window | None = None
+
         self.report_path: Optional[Path] = None
         self.log_filename: Optional[Path] = None
 
-    def _build_layout(self) -> List[List[sg.Element]]:
-        """Cria o layout da janela do analisador."""
-        font_family = self.config.font_family
-        btn_main = self.config.btn_colors.get('main', {})
-        btn_admin = self.config.btn_colors.get('admin', {})
-        btn_exit = self.config.btn_colors.get('exit', {})
-        INPUT_BG_COLOR = self.config.theme_definition.get('INPUT', '#1E293B')
-        TEXT_COLOR = self.config.theme_definition.get('TEXT', '#FAFAFA')
-        BG_COLOR = self.config.theme_definition.get('BACKGROUND', '#0F172A')
+        # Sinais para thread worker
+        self.worker_signals = WorkerSignals()
+        self.worker_signals.progress_update.connect(self.on_progress_update)
+        self.worker_signals.log_update.connect(self.on_log_update)
+        self.worker_signals.thread_done.connect(self.on_thread_done)
+        self.worker_signals.thread_error.connect(self.on_thread_error)
+        self.worker_signals.xml_parse_error.connect(self.on_xml_parse_error)
 
-        # --- Linha de Regras Detalhadas (Oculta por padrão) ---
-        linha_regras_detalhadas = [
-             sg.Text('Regras Detalhadas (NCM):', size=(22, 1), justification='right', font=(font_family, 10),
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-             sg.Input(key='-REGRAS_DETALHADAS-', readonly=True, enable_events=True, disabled=True),
-             sg.FileBrowse('📁 Procurar', file_types=(("Excel", "*.xlsx;*.xls"),), font=(font_family, 10),
-                           tooltip='(Opcional) Selecione o arquivo .xlsx/.xls com as regras de NCM',
-                           disabled=True, key='-BROWSE_DETALHES-')
-        ]
-        
-        # --- Linha de Template de Apuração (Oculta por padrão) ---
-        linha_apuracao = [
-            sg.Text('Arquivo Template:', size=(22, 1), justification='right', font=(font_family, 10),
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-            sg.Input(key='-TEMPLATE_APURACAO-', readonly=True, enable_events=True, disabled=True),
-            sg.FileBrowse('📁 Procurar Template', file_types=(("Excel", "*.xlsx"),), font=(font_family, 10),
-                          tooltip='(Opcional) Selecione sua planilha .xlsx de Apuração para preenchimento automático',
-                          disabled=True, key='-BROWSE_APURACAO-')
-        ]
+        self.init_ui()
 
+    def init_ui(self):
+        self.setWindowTitle("Massucatti - Analisador Fiscal")
+        self.resize(1000, 800)
+        self.setStyleSheet(get_stylesheet(self.config.font_family))
 
-        input_section = [
-            [sg.Text('Arquivo SPED Fiscal:', size=(22, 1), justification='right', font=(font_family, 10), 
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-             sg.Input(key='-SPED_FILE-', readonly=True, enable_events=True),
-             sg.FileBrowse('📁Procurar SPED', file_types=(("Arquivos de Texto", "*.txt"),), font=(font_family, 10),
-                           tooltip='Selecione o arquivo SPED .txt a ser analisado')],
-            
-            [sg.Text('Pasta com os XMLs:', size=(22, 1), justification='right', font=(font_family, 10), 
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-             sg.Input(key='-XML_FOLDER-', readonly=True, enable_events=True),
-             sg.FolderBrowse('📁 Procurar XML', font=(font_family, 10),
-                             tooltip='Selecione a pasta contendo os arquivos XML das notas fiscais')],
-            
-            [sg.Text('Arquivo de Regras (Acum.):', size=(22, 1), justification='right', font=(font_family, 10), 
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-             sg.Input(key='-REGRAS_FILE-', readonly=True, enable_events=True),
-             sg.FileBrowse('📁 Procurar REGRAS', file_types=(("CSV/Excel", "*.csv;*.xlsx;*.xls"),), font=(font_family, 10),
-                           tooltip='Selecione o arquivo .csv ou .xlsx/.xls com as regras de CNPJ/CFOP x Acumulador')],
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(30, 30, 30, 30)
 
-            # --- SELEÇÃO DE SETOR / ATIVIDADE (Incluindo E-commerce) ---
-            [sg.Text('Setor / Atividade:', size=(22, 1), justification='right', font=(font_family, 10),
-                     background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR),
-             sg.Combo(['Comercio', 'Moveleiro', 'E-commerce'], default_value='Comercio', key='-TIPO_SETOR-', 
-                      font=(font_family, 10), size=(20, 1), readonly=True, 
-                      background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR)],
-            # -----------------------------------------------------------
+        # Header
+        lbl_title = QLabel("Analisador Fiscal Massucatti")
+        lbl_title.setObjectName("Title")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(lbl_title)
 
-            # --- Checkbox Regras Detalhadas ---
-            [sg.Checkbox('Usar Regras Detalhadas (NCM)?', key='-TOGGLE_DETALHES-', default=False, enable_events=True,
-                         background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR, pad=((10,0),(10,0)))],
-            [sg.Column([linha_regras_detalhadas], key='-LINHA_DETALHES-', visible=False, background_color=INPUT_BG_COLOR, pad=(0,0))],
-            
-            # --- Checkbox Apuração ---
-            [sg.Checkbox('Apuração (Opcional)', key='-TOGGLE_APURACAO-', default=False, enable_events=True,
-                         background_color=INPUT_BG_COLOR, text_color=TEXT_COLOR, pad=((10,0),(10,0)))],
-            [sg.Column([linha_apuracao], key='-LINHA_APURACAO-', visible=False, background_color=INPUT_BG_COLOR, pad=(0,0))]
-        ]
+        lbl_desc = QLabel("Conciliação de SPED Fiscal vs. XMLs de Notas Fiscais")
+        lbl_desc.setObjectName("Subtitle")
+        lbl_desc.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(lbl_desc)
 
-        botoes_rodape = [
-            sg.Button('✅ Abrir Relatório', key='-OPEN_REPORT-', font=(font_family, 11, 'bold'),
-                      button_color=btn_main.get('normal', '#007ACC'),
-                      mouseover_colors=btn_main.get('hover', '#0099FF'),
-                      disabled_button_color=('#FAFAFA', btn_main.get('disabled', '#4A4A4A')),
-                      visible=False, disabled=True,
-                      tooltip='Abrir a planilha Excel gerada com o resultado da análise'),
-            sg.Push(),
-        ]
+        main_layout.addSpacing(10)
 
-        if 'manage_users' in self.permissions:
-            botoes_rodape.append(
-                sg.Button('⚙️ Gerenciar Usuários', key='-ADMIN_PANEL-', font=(font_family, 11, 'bold'),
-                          button_color=btn_admin.get('normal', '#5A5A5A'),
-                          mouseover_colors=btn_admin.get('hover', '#7A7A7A'),
-                          tooltip='Abrir painel para criar novos usuários')
-            )
+        # --- Configurações de Análise (GroupBox) ---
+        config_group = QGroupBox("Configurações de Análise")
+        config_layout = QGridLayout()
+        config_layout.setSpacing(10)
 
-        botoes_rodape.append(
-            sg.Button('⬅️ Voltar', key='-SAIR-', font=(font_family, 11, 'bold'),
-                      button_color=btn_exit.get('normal', '#4B5563'),
-                      mouseover_colors=btn_exit.get('hover', '#6B7280'),
-                      tooltip='Voltar para o menu principal')
-        )
+        # SPED File
+        config_layout.addWidget(QLabel("Arquivo SPED Fiscal:"), 0, 0)
+        self.txt_sped = QLineEdit()
+        self.txt_sped.setReadOnly(True)
+        config_layout.addWidget(self.txt_sped, 0, 1)
+        btn_sped = QPushButton("📁 Procurar SPED")
+        btn_sped.clicked.connect(lambda: self.browse_file(self.txt_sped, "Arquivo SPED (*.txt)"))
+        config_layout.addWidget(btn_sped, 0, 2)
 
-        layout = [
-            [sg.Text('Analisador Fiscal Massucatti', font=(font_family, 22, 'bold'), justification='center',
-                     expand_x=True, pad=((0,0),(15,5)), background_color=BG_COLOR, text_color=TEXT_COLOR)],
-            [sg.Text('Conciliação de SPED Fiscal vs. XMLs de Notas Fiscais', font=(font_family, 11),
-                     justification='center', expand_x=True, background_color=BG_COLOR, text_color=TEXT_COLOR)],
-            [sg.HorizontalSeparator(pad=((0,0),(10,15)))],
-            
-            [sg.Frame('Configurações de Análise',
-                      input_section,
-                      font=(font_family, 12, 'bold'),
-                      pad=(10, 10),
-                      expand_x=True,
-                      background_color=INPUT_BG_COLOR,
-                      title_color=TEXT_COLOR,
-                      border_width=1,
-                      element_justification='left')],
-            
-            [sg.Button('▶️ INICIAR ANÁLISE COMPLETA', key='-START-', font=(font_family, 14, 'bold'),
-                       size=(35, 2), button_color=btn_main.get('normal', '#007ACC'),
-                       mouseover_colors=btn_main.get('hover', '#0099FF'),
-                       disabled_button_color=('#FAFAFA', btn_main.get('disabled', '#4A4A4A')),
-                       disabled=True, tooltip='Iniciar o processo de conciliação fiscal',
-                       pad=((0,0), (20, 20)))], 
-            
-            [sg.Multiline(size=(90, 10), key='-OUTPUT-', background_color='#212121', text_color='#E0E0E0',
-                          disabled=True, autoscroll=True, reroute_stdout=True, reroute_stderr=True,
-                          font=(font_family, 9), expand_x=True)],
-            [sg.ProgressBar(100, orientation='h', size=(60, 20), key='-PROGRESS_BAR-', expand_x=True)],
-            
-            [sg.Graph((20,20), (0,0), (20,20), key='-STATUS_DOT-', background_color=BG_COLOR),
-             sg.Text('Status: Aguardando arquivos...', key='-STATUS_TEXT-', font=(font_family, 10),
-                     expand_x=True, background_color=BG_COLOR, text_color=TEXT_COLOR)],
-            
-            [sg.HorizontalSeparator(pad=((0,0),(15,5)))],
-            botoes_rodape
-        ]
-        return layout
+        # XML Folder
+        config_layout.addWidget(QLabel("Pasta com os XMLs:"), 1, 0)
+        self.txt_xml = QLineEdit()
+        self.txt_xml.setReadOnly(True)
+        config_layout.addWidget(self.txt_xml, 1, 1)
+        btn_xml = QPushButton("📁 Procurar XML")
+        btn_xml.clicked.connect(lambda: self.browse_folder(self.txt_xml))
+        config_layout.addWidget(btn_xml, 1, 2)
 
-    def _open_report(self) -> None:
-        """Abre o arquivo de relatório gerado."""
+        # Regras File
+        config_layout.addWidget(QLabel("Arquivo de Regras (Acum.):"), 2, 0)
+        self.txt_regras = QLineEdit()
+        self.txt_regras.setReadOnly(True)
+        config_layout.addWidget(self.txt_regras, 2, 1)
+        btn_regras = QPushButton("📁 Procurar REGRAS")
+        btn_regras.clicked.connect(lambda: self.browse_file(self.txt_regras, "CSV/Excel (*.csv *.xlsx *.xls)"))
+        config_layout.addWidget(btn_regras, 2, 2)
+
+        # Setor Combo
+        config_layout.addWidget(QLabel("Setor / Atividade:"), 3, 0)
+        self.cmb_setor = QComboBox()
+        self.cmb_setor.addItems(['Comercio', 'Moveleiro', 'E-commerce'])
+        config_layout.addWidget(self.cmb_setor, 3, 1)
+
+        # Regras Detalhadas (Checkbox + Input)
+        self.chk_detalhes = QCheckBox("Usar Regras Detalhadas (NCM)?")
+        self.chk_detalhes.toggled.connect(self.toggle_detalhes)
+        config_layout.addWidget(self.chk_detalhes, 4, 0)
+
+        self.txt_detalhes = QLineEdit()
+        self.txt_detalhes.setReadOnly(True)
+        self.txt_detalhes.setEnabled(False)
+        config_layout.addWidget(self.txt_detalhes, 4, 1)
+
+        self.btn_detalhes = QPushButton("📁 Procurar")
+        self.btn_detalhes.setEnabled(False)
+        self.btn_detalhes.clicked.connect(lambda: self.browse_file(self.txt_detalhes, "Excel (*.xlsx *.xls)"))
+        config_layout.addWidget(self.btn_detalhes, 4, 2)
+
+        # Apuração (Checkbox + Input)
+        self.chk_apuracao = QCheckBox("Apuração (Opcional)")
+        self.chk_apuracao.toggled.connect(self.toggle_apuracao)
+        config_layout.addWidget(self.chk_apuracao, 5, 0)
+
+        self.txt_apuracao = QLineEdit()
+        self.txt_apuracao.setReadOnly(True)
+        self.txt_apuracao.setEnabled(False)
+        config_layout.addWidget(self.txt_apuracao, 5, 1)
+
+        self.btn_apuracao = QPushButton("📁 Procurar Template")
+        self.btn_apuracao.setEnabled(False)
+        self.btn_apuracao.clicked.connect(lambda: self.browse_file(self.txt_apuracao, "Excel (*.xlsx)"))
+        config_layout.addWidget(self.btn_apuracao, 5, 2)
+
+        config_group.setLayout(config_layout)
+        main_layout.addWidget(config_group)
+
+        # Botão Start
+        self.btn_start = QPushButton("▶️ INICIAR ANÁLISE COMPLETA")
+        self.btn_start.setObjectName("Primary")
+        self.btn_start.setFixedHeight(50)
+        self.btn_start.clicked.connect(self.start_analysis)
+
+        # Validação de Permissão
+        if 'run_analysis' not in self.permissions:
+            self.btn_start.setEnabled(False)
+            self.btn_start.setText("PERMISSÃO NEGADA")
+        else:
+            # Habilita verificação dinâmica (opcional, pode ser feito ao clicar)
+            self.txt_sped.textChanged.connect(self.check_start_enabled)
+            self.txt_xml.textChanged.connect(self.check_start_enabled)
+            self.txt_regras.textChanged.connect(self.check_start_enabled)
+            self.btn_start.setEnabled(False) # Inicia desabilitado até preencher
+
+        main_layout.addWidget(self.btn_start)
+
+        # Logs e Progresso
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setPlaceholderText("Logs do processamento aparecerão aqui...")
+        main_layout.addWidget(self.txt_log)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        main_layout.addWidget(self.progress_bar)
+
+        self.lbl_status = QLabel("Status: Aguardando arquivos...")
+        main_layout.addWidget(self.lbl_status)
+
+        main_layout.addSpacing(10)
+
+        # Botões Rodapé
+        footer_layout = QHBoxLayout()
+        self.btn_open_report = QPushButton("✅ Abrir Relatório")
+        self.btn_open_report.setObjectName("Primary")
+        self.btn_open_report.setVisible(False)
+        self.btn_open_report.clicked.connect(self.open_report)
+        footer_layout.addWidget(self.btn_open_report)
+
+        footer_layout.addStretch()
+
+        self.btn_back = QPushButton("⬅️ Voltar")
+        self.btn_back.clicked.connect(self.close) # Fecha a janela (volta pro menu se modal, ou fecha app se main)
+        footer_layout.addWidget(self.btn_back)
+
+        main_layout.addLayout(footer_layout)
+
+    # --- Helpers de UI ---
+
+    def browse_file(self, line_edit, filter_str):
+        fpath, _ = QFileDialog.getOpenFileName(self, "Selecionar Arquivo", "", filter_str)
+        if fpath:
+            line_edit.setText(fpath)
+
+    def browse_folder(self, line_edit):
+        dpath = QFileDialog.getExistingDirectory(self, "Selecionar Pasta")
+        if dpath:
+            line_edit.setText(dpath)
+
+    def toggle_detalhes(self, checked):
+        self.txt_detalhes.setEnabled(checked)
+        self.btn_detalhes.setEnabled(checked)
+        if not checked: self.txt_detalhes.clear()
+        self.check_start_enabled()
+
+    def toggle_apuracao(self, checked):
+        self.txt_apuracao.setEnabled(checked)
+        self.btn_apuracao.setEnabled(checked)
+        if not checked: self.txt_apuracao.clear()
+
+    def check_start_enabled(self):
+        if 'run_analysis' not in self.permissions: return
+
+        has_sped = bool(self.txt_sped.text())
+        has_xml = bool(self.txt_xml.text())
+        has_regras = bool(self.txt_regras.text())
+
+        detalhes_ok = True
+        if self.chk_detalhes.isChecked():
+            detalhes_ok = bool(self.txt_detalhes.text())
+
+        self.btn_start.setEnabled(has_sped and has_xml and has_regras and detalhes_ok)
+
+    # --- Lógica de Execução ---
+    def start_analysis(self):
+        # Setup Logging (precisamos adaptar o logging para escrever no QTextEdit ou capturar sinal)
+        # O setup_logging original usa um widget multiline do SG.
+        # Vamos passar None lá e usar o sinal log_update daqui.
+        # OU criar um Handler customizado que emite para self.worker_signals.log_update
+
+        self.txt_log.clear()
+        self.btn_start.setEnabled(False)
+        self.btn_open_report.setVisible(False)
+        self.progress_bar.setValue(0)
+        self.lbl_status.setText("Status: Iniciando análise...")
+
+        # Paths
+        sped_path = Path(self.txt_sped.text())
+        xml_path = Path(self.txt_xml.text())
+        regras_path = Path(self.txt_regras.text())
+
+        # Opcionais
+        regras_det_path = Path(self.txt_detalhes.text()) if self.chk_detalhes.isChecked() else None
+        apuracao_path = Path(self.txt_apuracao.text()) if self.chk_apuracao.isChecked() else None
+
+        tipo_setor = self.cmb_setor.currentText()
+
+        # Adapter para a lógica
+        adapter = WindowAdapter(self.worker_signals)
+
+        # Thread
+        t = threading.Thread(target=self.run_logic_thread, args=(
+            sped_path, xml_path, regras_path, adapter, self.username,
+            self.config.cfop_sem_credito_icms, self.config.cfop_sem_credito_ipi,
+            self.config.tolerancia_valor,
+            regras_det_path, apuracao_path, tipo_setor
+        ))
+        t.daemon = True
+        t.start()
+
+    def run_logic_thread(self, *args):
+        # Wrapper para chamar a função lógica
+        # args: sped_path, xml_path, regras_path, window(adapter), username, ...
+        try:
+            executar_analise_completa(*args)
+        except Exception as e:
+            self.worker_signals.thread_error.emit(str(e))
+
+    # --- Slots (Recebem sinais da Thread) ---
+    @Slot(tuple)
+    def on_progress_update(self, data):
+        current, total = data
+        if total > 0:
+            self.progress_bar.setMaximum(total)
+            self.progress_bar.setValue(current)
+            percent = int((current / total) * 100)
+            self.lbl_status.setText(f"Status: Processando XMLs... ({percent}%)")
+
+    @Slot(str)
+    def on_log_update(self, msg):
+        self.txt_log.append(msg)
+
+    @Slot(object)
+    def on_thread_done(self, result_data):
+        path, problemas = result_data
+        self.report_path = path
+
+        msg = f"Concluído! ({problemas} inconsistências)" if problemas > 0 else "Concluído! Sucesso total."
+        self.lbl_status.setText(f"Status: {msg}")
+        self.progress_bar.setValue(self.progress_bar.maximum())
+
+        self.btn_open_report.setVisible(True)
+        self.check_start_enabled() # Reabilita botão start
+
+        QMessageBox.information(self, "Sucesso", "Análise de conciliação concluída!")
+
+    @Slot(str)
+    def on_thread_error(self, err_msg):
+        self.lbl_status.setText("Status: ERRO NA ANÁLISE!")
+        self.check_start_enabled()
+        QMessageBox.critical(self, "Erro na Análise", f"A análise falhou.\n\nDetalhe: {err_msg}")
+
+    @Slot(str)
+    def on_xml_parse_error(self, filename):
+        # Apenas loga ou mostra aviso não intrusivo
+        self.txt_log.append(f"[AVISO] XML mal formatado ignorado: {filename}")
+
+    def open_report(self):
         if self.report_path and self.report_path.exists():
             try:
                 if sys.platform == "win32":
                     os.startfile(str(self.report_path.resolve()))
-                elif sys.platform == "darwin": # macOS
+                elif sys.platform == "darwin":
                     subprocess.run(['open', str(self.report_path.resolve())])
-                else: # linux variants
+                else:
                     subprocess.run(['xdg-open', str(self.report_path.resolve())])
             except Exception as e:
-                sg.popup_error(f"Não foi possível abrir o relatório automaticamente.\nErro: {e}\n\nCaminho: {self.report_path.resolve()}", title="Erro")
+                QMessageBox.warning(self, "Erro", f"Não foi possível abrir o relatório:\n{e}")
         else:
-            sg.popup_error("Arquivo de relatório não encontrado.", title="Erro")
+            QMessageBox.warning(self, "Erro", "Arquivo de relatório não encontrado.")
 
-
-    def run(self) -> None:
-        """Exibe a janela do analisador e gerencia seu loop de eventos."""
-        layout = self._build_layout()
-        
-        self.window = sg.Window('Massucatti - Analisador Fiscal', layout, size=(800, 900), 
-                                finalize=True, element_justification='center', modal=True,
-                                icon=self.config.app_icon_path)
-
-        status_dot = self.window['-STATUS_DOT-']
-        status_dot_id = status_dot.draw_circle((10,10), 8, fill_color='#5A5A5A', line_color='#5A5A5A')
-
-        self.log_filename = setup_logging(self.config.base_path, self.window['-OUTPUT-'], self.username)
-
-        if 'run_analysis' not in self.permissions:
-            self.window['-START-'].update(disabled=True, text="PERMISSÃO NEGADA")
-            self.window['-STATUS_TEXT-'].update('Status: Sem permissão para executar análises.')
-            status_dot.delete_figure(status_dot_id)
-            status_dot_id = status_dot.draw_circle((10,10), 8, fill_color='#E74C3C', line_color='#E74C3C')
-
-        while True:
-            event, values = self.window.read()
-            if event == sg.WIN_CLOSED or event == '-SAIR-': break
-
-            if event == '-ADMIN_PANEL-':
-                if 'manage_users' in self.permissions:
-                    admin_win = AdminWindow(self.config)
-                    admin_win.run()
-                else:
-                    sg.popup_error("Você não tem permissão para gerenciar usuários.", title="Acesso Negado")
-
-            
-            # --- Eventos que habilitam o botão START ---
-            if event in ('-SPED_FILE-', '-XML_FOLDER-', '-REGRAS_FILE-', '-REGRAS_DETALHADAS-', 
-                         '-TOGGLE_DETALHES-', '-TEMPLATE_APURACAO-', '-TOGGLE_APURACAO-'):
-            
-                # Arquivos obrigatórios
-                obrigatorios_ok = all(values.get(k) for k in ['-SPED_FILE-', '-XML_FOLDER-', '-REGRAS_FILE-'])
-                # Verifica regras detalhadas apenas se o checkbox estiver marcado
-                detalhes_visiveis = values.get('-TOGGLE_DETALHES-', False)
-                detalhes_ok = (not detalhes_visiveis) or (detalhes_visiveis and values.get('-REGRAS_DETALHADAS-'))
-
-                # O template de apuração é opcional, então NÃO é incluído no 'pode_iniciar'
-                pode_iniciar = obrigatorios_ok and detalhes_ok
-
-                # Só habilita se tiver os arquivos E a permissão
-                if 'run_analysis' in self.permissions:
-                    self.window['-START-'].update(disabled=not pode_iniciar)
-            
-            # --- Mostrar/Ocultar Regras Detalhadas ---
-            if event == '-TOGGLE_DETALHES-':
-                visivel = values['-TOGGLE_DETALHES-']
-                self.window['-LINHA_DETALHES-'].update(visible=visivel)
-                self.window['-REGRAS_DETALHADAS-'].update(disabled=not visivel)
-                self.window['-BROWSE_DETALHES-'].update(disabled=not visivel)
-                if not visivel: self.window['-REGRAS_DETALHADAS-'].update('')
-                
-                # Reavalia botão START
-                obrigatorios_ok = all(values.get(k) for k in ['-SPED_FILE-', '-XML_FOLDER-', '-REGRAS_FILE-'])
-                detalhes_ok = (not visivel) or (visivel and values.get('-REGRAS_DETALHADAS-'))
-                pode_iniciar = obrigatorios_ok and detalhes_ok
-                if 'run_analysis' in self.permissions:
-                    self.window['-START-'].update(disabled=not pode_iniciar)
-            
-            # --- Mostrar/Ocultar Apuração ---
-            if event == '-TOGGLE_APURACAO-':
-                visivel = values['-TOGGLE_APURACAO-']
-                self.window['-LINHA_APURACAO-'].update(visible=visivel)
-                self.window['-TEMPLATE_APURACAO-'].update(disabled=not visivel)
-                self.window['-BROWSE_APURACAO-'].update(disabled=not visivel)
-                if not visivel: self.window['-TEMPLATE_APURACAO-'].update('')
-
-
-            if event == '-START-':
-                self.log_filename = setup_logging(self.config.base_path, self.window['-OUTPUT-'], self.username)
-                self.window['-OUTPUT-'].update('')
-                self.window['-START-'].update(disabled=True)
-                self.window['-OPEN_REPORT-'].update(visible=False, disabled=True)
-                status_dot.delete_figure(status_dot_id)
-                status_dot_id = status_dot.draw_circle((10,10), 8, fill_color='#F1C40F', line_color='#F1C40F')
-                self.window['-STATUS_TEXT-'].update('Status: Iniciando análise...')
-                self.window['-PROGRESS_BAR-'].update(0, 100)
-
-                sped_path = Path(values['-SPED_FILE-'])
-                xml_path = Path(values['-XML_FOLDER-'])
-                regras_path = Path(values['-REGRAS_FILE-'])
-                
-                # --- PEGA O VALOR DO COMBO DE SETOR ---
-                tipo_setor_selecionado = values['-TIPO_SETOR-']
-                # --------------------------------------------
-
-                # Obtém o caminho das regras detalhadas APENAS se o checkbox estiver marcado
-                regras_detalhadas_path = None
-                if values.get('-TOGGLE_DETALHES-') and values.get('-REGRAS_DETALHADAS-'):
-                    try:
-                        regras_detalhadas_path = Path(values['-REGRAS_DETALHADAS-'])
-                    except TypeError:
-                        sg.popup_warning("Caminho para regras detalhadas inválido. A análise detalhada será ignorada.", title="Aviso")
-                        regras_detalhadas_path = None
-
-                # --- Obter o caminho do template de apuração (opcional) ---
-                template_apuracao_path: Optional[Path] = None
-                if values.get('-TOGGLE_APURACAO-') and values.get('-TEMPLATE_APURACAO-'):
-                    try:
-                        temp_path = Path(values['-TEMPLATE_APURACAO-'])
-                        if temp_path.exists():
-                            template_apuracao_path = temp_path
-                        else:
-                            sg.popup_warning(f"Arquivo de template não encontrado:\n{temp_path}\n\nO preenchimento automático será ignorado.", title="Aviso")
-                            template_apuracao_path = None
-                    except Exception:
-                        sg.popup_warning("Caminho do template de apuração inválido. O preenchimento automático será ignorado.", title="Aviso")
-                        template_apuracao_path = None
-                
-                # Inicia a Thread passando o setor selecionado
-                threading.Thread(target=executar_analise_completa,
-                                 args=(sped_path, xml_path, regras_path, self.window, self.username,
-                                       self.config.cfop_sem_credito_icms, self.config.cfop_sem_credito_ipi,
-                                       self.config.tolerancia_valor,
-                                       regras_detalhadas_path,
-                                       template_apuracao_path,
-                                       tipo_setor_selecionado # <--- PASSA PARA O MAESTRO
-                                      ),
-                                 daemon=True).start()
-                
-            if event == '-PROGRESS_UPDATE-':
-                progress_data: Tuple[int, int] = values[event]
-                max_val = progress_data[1] if progress_data[1] > 0 else 100
-                current_val = progress_data[0]
-                self.window['-PROGRESS_BAR-'].update(current_count=current_val, max=max_val)
-                if max_val > 0 :
-                    percent = int((current_val / max_val) * 100)
-                    self.window['-STATUS_TEXT-'].update(f'Status: Processando XMLs... ({percent}%)')
-
-            if event == '-XML_PARSE_ERROR-':
-                sg.popup_warning(f"XML mal formatado ignorado:\n{values[event]}", title="Aviso")
-
-            if event == '-THREAD_DONE-':
-                result_data: Tuple[Path, int] = values[event]
-                self.report_path, total_problemas = result_data
-                status_msg = (f'Concluído! ({total_problemas} notas com inconsistências)' if total_problemas > 0 else
-                            'Concluído! Nenhuma inconsistência encontrada.')
-                status_dot.delete_figure(status_dot_id)
-                status_dot_id = status_dot.draw_circle((10,10), 8, fill_color='#2ECC71', line_color='#2ECC71')
-                self.window['-STATUS_TEXT-'].update(f'Status: {status_msg}')
-                self.window['-OPEN_REPORT-'].update(visible=True, disabled=False)
-                
-                # Reabilita botões
-                obrigatorios_ok = all(values.get(k) for k in ['-SPED_FILE-', '-XML_FOLDER-', '-REGRAS_FILE-'])
-                detalhes_visiveis = values.get('-TOGGLE_DETALHES-', False)
-                detalhes_ok = (not detalhes_visiveis) or (detalhes_visiveis and values.get('-REGRAS_DETALHADAS-'))
-                pode_iniciar = obrigatorios_ok and detalhes_ok
-                if 'run_analysis' in self.permissions:
-                        self.window['-START-'].update(disabled=not pode_iniciar)
-                sg.popup_ok('Análise de conciliação concluída!', title="Sucesso")
-
-            if event == '-THREAD_ERROR-':
-                error_message = values.get(event, "Erro desconhecido")
-                status_dot.delete_figure(status_dot_id)
-                status_dot_id = status_dot.draw_circle((10,10), 8, fill_color='#E74C3C', line_color='#E74C3C')
-                self.window['-STATUS_TEXT-'].update('Status: ERRO NA ANÁLISE!')
-                log_msg_display = f"Consulte o arquivo de log para mais detalhes técnicos:\n{self.log_filename}" if self.log_filename else "Não foi possível criar o arquivo de log."
-                sg.popup_error(f"A análise falhou.\n\nDetalhe: {error_message}\n\n{log_msg_display}", title="Erro na Análise")
-                
-                # Reabilita botões
-                obrigatorios_ok = all(values.get(k) for k in ['-SPED_FILE-', '-XML_FOLDER-', '-REGRAS_FILE-'])
-                detalhes_visiveis = values.get('-TOGGLE_DETALHES-', False)
-                detalhes_ok = (not detalhes_visiveis) or (detalhes_visiveis and values.get('-REGRAS_DETALHADAS-'))
-                pode_iniciar = obrigatorios_ok and detalhes_ok
-                if 'run_analysis' in self.permissions:
-                        self.window['-START-'].update(disabled=not pode_iniciar)
-
-            if event == '-OPEN_REPORT-':
-                self._open_report()
-
-        if self.window:
-            self.window.close()
-        self.window = None
+    # Compatibilidade: Método run não é padrão Qt (usamos show no controller), mas se precisar
+    def run(self):
+        self.show()
