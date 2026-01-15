@@ -1,0 +1,70 @@
+{
+  "admin": {
+    "password": "$2b$12$9BkSXgCYlgPpSHy/4cd39ekZM43vX7iZIaonSDutFmvCb1/sGyAfa",
+    "permissions": [
+      "run_analysis",
+      "run_analysis_industrias",
+      "run_automation_lhs",
+      "run_filtro_sped",
+      "run_key_extractor",
+      "manage_users",
+      "view_logs",
+      "admin"
+    ]
+  },
+  "teste": {
+    "password": "$2b$12$dYwqkEbNXn.c9LB.28/4h.7hQhpHcFyce/U9nvu.oZgQn7imtm/5W",
+    "permissions": [
+      "run_analysis",
+      "run_analysis_industrias"
+    ]
+  },
+  "andre": {
+    "password": "$2b$12$qXU8EFikepL3OYTx1oDNduJZ3Lw9MlDZKQW2qHVkg9AHlNh3oTAaC",
+    "permissions": [
+      "admin",
+      "manage_users",
+      "run_analysis",
+      "run_analysis_industrias",
+      "run_automation_lhs",
+      "run_filtro_sped",
+      "run_key_extractor"
+    ]
+  },
+  "barbara": {
+    "password": "$2b$12$Kf9f.0QAz1SD0h8gHasKAOOCM.ztGSk0TYRknNKw3nZlrAg2RWf5y",
+    "permissions": [
+      "run_analysis",
+      "run_filtro_sped",
+      "run_key_extractor"
+    ]
+  },
+  "hanna": {
+    "password": "$2b$12$tFwh/D.ne6zZKV/xVnKinuGKFGWaEFLStrCuM8Hv6uU8l5KLbIBI2",
+    "permissions": [
+      "run_analysis",
+      "run_filtro_sped",
+      "run_key_extractor"
+    ]
+  },
+  "emily": {
+    "password": "$2b$12$rQVcCrk6NSOEZlXhhBdUdO8pzRzHLBtFhtYP3PpgV/zZ.cu7RTlwm",
+    "permissions": [
+      "run_analysis",
+      "run_filtro_sped",
+      "run_key_extractor"
+    ]
+  },
+  "ramone": {
+    "password": "$2b$12$5wsqOuGCewUbqJTekOOtt.vBLn68FSFk/x1ulhCt4eiHJKXqFIfPG",
+    "permissions": [
+      "admin",
+      "manage_users",
+      "run_analysis",
+      "run_analysis_industrias",
+      "run_automation_lhs",
+      "run_filtro_sped",
+      "run_key_extractor"
+    ]
+  }
+}
